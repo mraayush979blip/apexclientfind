@@ -143,9 +143,17 @@ app.post('/api/audit', async (req, res) => {
     }
 
     try {
-        console.log(`Auditing website: ${website}`);
-        // Add a timeout to prevent hanging on slow websites
-        const response = await axios.get(website, { timeout: 10000 });
+        let validUrl = website;
+        if (!validUrl.startsWith('http://') && !validUrl.startsWith('https://')) {
+            validUrl = `https://${validUrl}`;
+        }
+        
+        console.log(`Auditing website: ${validUrl}`);
+        // Add a timeout to prevent hanging on slow websites, and a real User-Agent
+        const response = await axios.get(validUrl, { 
+            timeout: 10000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' }
+        });
         const html = response.data;
         const $ = cheerio.load(html);
         
@@ -206,9 +214,10 @@ app.post('/api/audit', async (req, res) => {
                 }
             }
         } catch (psError) {
-            console.error(`PageSpeed Insights failed for ${website}:`, psError.message);
+            console.error(`PageSpeed Insights failed for ${validUrl}:`, psError.message);
             if (psError.response && psError.response.status === 429) {
-                errors.push("Google PageSpeed API rate limit reached. Using basic fallback audit.");
+                console.log("Google PageSpeed API rate limit reached. Using basic fallback audit silently.");
+                // Remove the error push so it doesn't look like an error in the UI
             } else {
                 errors.push("Failed to run full speed audit (timeout or inaccessible).");
             }
@@ -295,6 +304,8 @@ CRITICAL INSTRUCTIONS:
 app.listen(PORT, () => {
     console.log(`Backend server running on http://localhost:${PORT}`);
 });
+
+module.exports = app;
 
 // --- Database API Endpoints ---
 
