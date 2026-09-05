@@ -235,7 +235,7 @@ function App() {
           fetch('/api/search-history', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ location: locationStr, category: industry, resultsCount: processedLeads.length })
+            body: JSON.stringify({ location: locationStr, category: category, resultsCount: processedLeads.length })
           }).catch(console.error);
           return newHistory;
       });
