@@ -28,7 +28,7 @@ const groq = new Groq({
 if (!process.env.MONGODB_URI) {
     console.error('CRITICAL: MONGODB_URI is not set in .env');
 } else {
-    mongoose.connect(process.env.MONGODB_URI)
+    await connectToDatabase(); mongoose.connect(process.env.MONGODB_URI)
         .then(() => console.log('Connected to MongoDB Atlas successfully.'))
         .catch((err) => console.error('MongoDB connection error:', err));
 }
@@ -46,6 +46,22 @@ const LeadSchema = new mongoose.Schema({
 });
 
 const Lead = mongoose.model('Lead', LeadSchema);
+
+const SearchHistorySchema = new mongoose.Schema({
+    location: String,
+    category: String,
+    resultsCount: Number,
+    timestamp: { type: Date, default: Date.now }
+});
+const SearchHistory = mongoose.model('SearchHistory', SearchHistorySchema);
+
+const SeenLeadSchema = new mongoose.Schema({
+    // Keep it generic to allow saving full lead payload
+    leadId: { type: String, required: true, unique: true },
+    data: { type: mongoose.Schema.Types.Mixed },
+    timestamp: { type: Date, default: Date.now }
+});
+const SeenLead = mongoose.model('SeenLead', SeenLeadSchema);
 
 app.post('/api/scan', async (req, res) => {
     const { location, category, limit } = req.body;
@@ -298,6 +314,75 @@ CRITICAL INSTRUCTIONS:
     } catch (error) {
         console.error('Groq API Error:', error);
         res.status(500).json({ error: 'Failed to generate pitch', details: error.message });
+    }
+});
+
+// Search History Routes
+app.get('/api/search-history', async (req, res) => {
+    try {
+        await connectToDatabase();
+        const history = await SearchHistory.find().sort({ timestamp: -1 }).limit(50);
+        res.json(history);
+    } catch (error) {
+        console.error('Failed to fetch search history:', error);
+        res.status(500).json({ error: 'Failed to fetch search history' });
+    }
+});
+
+app.post('/api/search-history', async (req, res) => {
+    try {
+        await connectToDatabase();
+        const { location, category, resultsCount } = req.body;
+        const entry = new SearchHistory({ location, category, resultsCount });
+        await entry.save();
+        res.json(entry);
+    } catch (error) {
+        console.error('Failed to save search history:', error);
+        res.status(500).json({ error: 'Failed to save search history' });
+    }
+});
+
+// Seen Leads Routes
+app.get('/api/seen-leads', async (req, res) => {
+    try {
+        await connectToDatabase();
+        const seen = await SeenLead.find().sort({ timestamp: -1 });
+        const record = {};
+        seen.forEach(s => {
+            record[s.leadId] = s.data;
+        });
+        res.json(record);
+    } catch (error) {
+        console.error('Failed to fetch seen leads:', error);
+        res.status(500).json({ error: 'Failed to fetch seen leads' });
+    }
+});
+
+app.post('/api/seen-leads', async (req, res) => {
+    try {
+        await connectToDatabase();
+        const { leadId, data } = req.body;
+        // Upsert to handle duplicates
+        const seen = await SeenLead.findOneAndUpdate(
+            { leadId },
+            { leadId, data },
+            { upsert: true, new: true }
+        );
+        res.json(seen);
+    } catch (error) {
+        console.error('Failed to mark lead as seen:', error);
+        res.status(500).json({ error: 'Failed to mark lead as seen' });
+    }
+});
+
+app.delete('/api/seen-leads/:leadId', async (req, res) => {
+    try {
+        await connectToDatabase();
+        await SeenLead.findOneAndDelete({ leadId: req.params.leadId });
+        res.json({ message: 'Removed from seen' });
+    } catch (error) {
+        console.error('Failed to unmark lead as seen:', error);
+        res.status(500).json({ error: 'Failed to unmark lead as seen' });
     }
 });
 
