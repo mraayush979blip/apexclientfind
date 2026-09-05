@@ -235,7 +235,7 @@ function App() {
           fetch('/api/search-history', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ location: locationStr, category: category, resultsCount: processedLeads.length })
+            body: JSON.stringify({ location: locationStr, category: category, resultsCount: processedLeads.length, leads: processedLeads })
           }).catch(console.error);
           return newHistory;
       });
@@ -806,7 +806,7 @@ function App() {
               <div key={search.id} style={{ padding: '20px', background: 'var(--bg-panel)', borderRadius: '12px', border: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                       <h3 style={{fontSize: '18px', color: 'var(--text-main)', marginBottom: '4px'}}>{search.category} in {search.location}</h3>
-                      <p style={{fontSize: '13px', color: 'var(--text-muted)'}}>{new Date(search.timestamp).toLocaleString()} • {search.leads.length} leads</p>
+                      <p style={{fontSize: '13px', color: 'var(--text-muted)'}}>{new Date(search.timestamp).toLocaleString()} • {search.resultsCount || (search.leads && search.leads.length) || 0} leads</p>
                   </div>
                   <button className="btn-audit" onClick={() => setSelectedSearch(search)}>
                       View Leads <ArrowRight size={14}/>

@@ -51,6 +51,7 @@ const SearchHistorySchema = new mongoose.Schema({
     location: String,
     category: String,
     resultsCount: Number,
+    leads: { type: mongoose.Schema.Types.Mixed },
     timestamp: { type: Date, default: Date.now }
 });
 const SearchHistory = mongoose.model('SearchHistory', SearchHistorySchema);
@@ -331,9 +332,8 @@ app.get('/api/search-history', async (req, res) => {
 
 app.post('/api/search-history', async (req, res) => {
     try {
-        
-        const { location, category, resultsCount } = req.body;
-        const entry = new SearchHistory({ location, category, resultsCount });
+        const { location, category, resultsCount, leads } = req.body;
+        const entry = new SearchHistory({ location, category, resultsCount, leads });
         await entry.save();
         res.json(entry);
     } catch (error) {
