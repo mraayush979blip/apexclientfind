@@ -192,7 +192,7 @@ function App() {
     }
     
     try {
-      const response = await fetch('http://localhost:5000/api/scan', {
+      const response = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ location: locationStr, category: category || 'Business', limit: maxLeads }) 
@@ -254,7 +254,7 @@ function App() {
   const fetchSavedLeads = async () => {
     setLoadingSaved(true);
     try {
-      const response = await fetch('http://localhost:5000/api/leads');
+      const response = await fetch('/api/leads');
       const data = await response.json();
       setSavedLeads(data.leads || []);
     } catch (error) {
@@ -266,7 +266,7 @@ function App() {
 
   const handleSaveLead = async (lead: any) => {
     try {
-      const response = await fetch('http://localhost:5000/api/leads', {
+      const response = await fetch('/api/leads', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(lead)
@@ -283,7 +283,7 @@ function App() {
   const handleUpdateSavedLead = async (id: string, updates: any) => {
     setSavedLeads(prev => prev.map(l => l.id === id ? { ...l, ...updates } : l));
     try {
-      await fetch(`http://localhost:5000/api/leads/${id}`, {
+      await fetch(`/api/leads/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates)
@@ -297,7 +297,7 @@ function App() {
     if (!confirm('Are you sure you want to delete this lead?')) return;
     setSavedLeads(prev => prev.filter(l => l.id !== id));
     try {
-      await fetch(`http://localhost:5000/api/leads/${id}`, { method: 'DELETE' });
+      await fetch(`/api/leads/${id}`, { method: 'DELETE' });
     } catch (error) {
       console.error('Error deleting lead:', error);
     }
@@ -310,7 +310,7 @@ function App() {
     }
     setAuditingIds(prev => [...prev, lead.id]);
     try {
-        const response = await fetch('http://localhost:5000/api/audit', {
+        const response = await fetch('/api/audit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ website: lead.website })
@@ -328,7 +328,7 @@ function App() {
     setPitchingIds(prev => [...prev, lead.id]);
     setPitchTypes(prev => ({ ...prev, [lead.id]: type }));
     try {
-        const response = await fetch('http://localhost:5000/api/generate-pitch', {
+        const response = await fetch('/api/generate-pitch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ lead, pitchType: type })
