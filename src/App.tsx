@@ -136,22 +136,28 @@ function App() {
   const [filterNoPhone, setFilterNoPhone] = useState(false);
   const [filterHideSeen, setFilterHideSeen] = useState(false);
 
-  const [seenLeads, setSeenLeads] = useState<Record<string, any>>(() => {
-    const saved = localStorage.getItem('seenLeads');
-    if (!saved) return {};
-    try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return {};
-        return parsed;
-    } catch {
-        return {};
-    }
-  });
+  const [seenLeads, setSeenLeads] = useState<Record<string, any>>({});
+  const [searchHistory, setSearchHistory] = useState<any[]>([]);
 
-  const [searchHistory, setSearchHistory] = useState<any[]>(() => {
-    const saved = localStorage.getItem('searchHistory');
-    return saved ? JSON.parse(saved) : [];
-  });
+  useEffect(() => {
+    if (isLoggedIn) {
+      // Fetch seen leads
+      fetch('/api/seen-leads')
+        .then(res => res.json())
+        .then(data => {
+            if (data && !data.error) setSeenLeads(data);
+        })
+        .catch(err => console.error(err));
+
+      // Fetch search history
+      fetch('/api/search-history')
+        .then(res => res.json())
+        .then(data => {
+            if (Array.isArray(data)) setSearchHistory(data);
+        })
+        .catch(err => console.error(err));
+    }
+  }, [isLoggedIn]);
 
   // Saved Leads States
   const [savedLeads, setSavedLeads] = useState<any[]>([]);
@@ -226,7 +232,11 @@ function App() {
               },
               ...prev
           ].slice(0, 15);
-          localStorage.setItem('searchHistory', JSON.stringify(newHistory));
+          fetch('/api/search-history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ location: locationStr, category: industry, resultsCount: processedLeads.length })
+          }).catch(console.error);
           return newHistory;
       });
 
@@ -238,17 +248,31 @@ function App() {
     }
   };
 
-  const handleMarkSeen = (lead: any) => {
+  const handleMarkSeen = async (lead: any) => {
+    const isSeen = !!seenLeads[lead.id];
     setSeenLeads(prev => {
         const updated = { ...prev };
-        if (updated[lead.id]) {
+        if (isSeen) {
             delete updated[lead.id];
         } else {
             updated[lead.id] = lead;
         }
-        localStorage.setItem('seenLeads', JSON.stringify(updated));
         return updated;
     });
+
+    try {
+        if (isSeen) {
+            await fetch(`/api/seen-leads/${lead.id}`, { method: 'DELETE' });
+        } else {
+            await fetch('/api/seen-leads', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ leadId: lead.id, data: lead })
+            });
+        }
+    } catch (error) {
+        console.error('Error updating seen lead:', error);
+    }
   };
 
   const fetchSavedLeads = async () => {
