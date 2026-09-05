@@ -28,7 +28,7 @@ const groq = new Groq({
 if (!process.env.MONGODB_URI) {
     console.error('CRITICAL: MONGODB_URI is not set in .env');
 } else {
-    await connectToDatabase(); mongoose.connect(process.env.MONGODB_URI)
+     mongoose.connect(process.env.MONGODB_URI)
         .then(() => console.log('Connected to MongoDB Atlas successfully.'))
         .catch((err) => console.error('MongoDB connection error:', err));
 }
@@ -320,7 +320,7 @@ CRITICAL INSTRUCTIONS:
 // Search History Routes
 app.get('/api/search-history', async (req, res) => {
     try {
-        await connectToDatabase();
+        
         const history = await SearchHistory.find().sort({ timestamp: -1 }).limit(50);
         res.json(history);
     } catch (error) {
@@ -331,7 +331,7 @@ app.get('/api/search-history', async (req, res) => {
 
 app.post('/api/search-history', async (req, res) => {
     try {
-        await connectToDatabase();
+        
         const { location, category, resultsCount } = req.body;
         const entry = new SearchHistory({ location, category, resultsCount });
         await entry.save();
@@ -345,7 +345,7 @@ app.post('/api/search-history', async (req, res) => {
 // Seen Leads Routes
 app.get('/api/seen-leads', async (req, res) => {
     try {
-        await connectToDatabase();
+        
         const seen = await SeenLead.find().sort({ timestamp: -1 });
         const record = {};
         seen.forEach(s => {
@@ -360,7 +360,7 @@ app.get('/api/seen-leads', async (req, res) => {
 
 app.post('/api/seen-leads', async (req, res) => {
     try {
-        await connectToDatabase();
+        
         const { leadId, data } = req.body;
         // Upsert to handle duplicates
         const seen = await SeenLead.findOneAndUpdate(
@@ -377,7 +377,7 @@ app.post('/api/seen-leads', async (req, res) => {
 
 app.delete('/api/seen-leads/:leadId', async (req, res) => {
     try {
-        await connectToDatabase();
+        
         await SeenLead.findOneAndDelete({ leadId: req.params.leadId });
         res.json({ message: 'Removed from seen' });
     } catch (error) {
