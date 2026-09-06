@@ -56,6 +56,17 @@ const SearchHistorySchema = new mongoose.Schema({
 });
 const SearchHistory = mongoose.model('SearchHistory', SearchHistorySchema);
 
+const DomainAuditSchema = new mongoose.Schema({
+    domain: { type: String, required: true, unique: true },
+    emails: [String],
+    decisionMakers: [mongoose.Schema.Types.Mixed],
+    performanceScore: Number,
+    seoScore: Number,
+    errors: [String],
+    auditedAt: { type: Date, default: Date.now }
+});
+const DomainAudit = mongoose.model('DomainAudit', DomainAuditSchema);
+
 const SeenLeadSchema = new mongoose.Schema({
     // Keep it generic to allow saving full lead payload
     leadId: { type: String, required: true, unique: true },
@@ -444,6 +455,20 @@ app.post('/api/audit', async (req, res) => {
         if (!validUrl.startsWith('http://') && !validUrl.startsWith('https://')) {
             validUrl = `https://${validUrl}`;
         }
+        const domain = new URL(validUrl).hostname.replace('www.', '');
+        
+        // Check for cached audit
+        const cachedAudit = await DomainAudit.findOne({ domain });
+        if (cachedAudit) {
+            console.log(`Returning cached audit for ${domain}`);
+            return res.json({
+                emails: cachedAudit.emails,
+                decisionMakers: cachedAudit.decisionMakers,
+                performanceScore: cachedAudit.performanceScore,
+                seoScore: cachedAudit.seoScore,
+                errors: cachedAudit.errors
+            });
+        }
         
         console.log(`Auditing website: ${validUrl}`);
         // Add a timeout to prevent hanging on slow websites, and a real User-Agent
@@ -542,7 +567,6 @@ app.post('/api/audit', async (req, res) => {
 
         // 3. Fetch Decision Makers via APIs
         let decisionMakers = [];
-        const domain = new URL(validUrl).hostname.replace('www.', '');
         const dmPromises = [];
 
         if (process.env.HUNTER_API_KEY) {
@@ -613,13 +637,26 @@ app.post('/api/audit', async (req, res) => {
             }
         }
 
-        res.json({ 
+        const auditResult = { 
             emails: validEmails,
             decisionMakers,
             performanceScore,
             seoScore,
             errors
-        });
+        };
+        
+        // Save to cache
+        try {
+            await DomainAudit.findOneAndUpdate(
+                { domain },
+                { ...auditResult, domain, auditedAt: new Date() },
+                { upsert: true, new: true }
+            );
+        } catch (dbErr) {
+            console.error("Failed to cache audit:", dbErr.message);
+        }
+
+        res.json(auditResult);
     } catch (error) {
         console.error(`Failed to audit ${website}:`, error.message);
         // If the main HTML fetch fails, return empty
