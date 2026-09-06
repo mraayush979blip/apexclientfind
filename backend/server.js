@@ -72,11 +72,8 @@ app.post('/api/scan', async (req, res) => {
         return res.status(400).json({ error: 'Location and category are required' });
     }
 
-    // Track if client disconnected
-    let clientDisconnected = false;
     req.on('close', () => {
-        clientDisconnected = true;
-        console.log(`Client disconnected during scan for ${category} in ${location}`);
+        console.log(`Connection closed for scan ${category} in ${location}`);
     });
 
     // Set headers for SSE
@@ -88,7 +85,7 @@ app.post('/api/scan', async (req, res) => {
 
     // Helper to send SSE events
     const sendEvent = (data) => {
-        if (clientDisconnected || res.writableEnded) return;
+        if (res.writableEnded) return;
         res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
