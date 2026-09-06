@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom';
-import { Search, MapPin, Activity, Download, Plus, Star, Phone, Globe, SlidersHorizontal, ShieldAlert, Lock, Sparkles, Eye, EyeOff, History, ArrowRight } from 'lucide-react';
+import { Search, MapPin, Activity, Download, Plus, Star, Phone, Globe, SlidersHorizontal, ShieldAlert, Lock, Sparkles, Eye, EyeOff, History, ArrowRight, Menu, X } from 'lucide-react';
 import './index.css';
 
 // --- Components Defined OUTSIDE App ---
@@ -57,26 +57,34 @@ function Login({ onLogin }: { onLogin: (id: string, pass: string) => void }) {
 
 function Layout({ children, onLogout }: { children: React.ReactNode, onLogout: () => void }) {
   const location = useLocation();
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
   return (
     <div className="app-container">
       <nav className="top-nav">
-        <div className="brand-nav">
-          <div className="brand-icon"><Activity size={20} /></div>
-          <h1>ApexClientFind <span style={{fontSize: '12px', fontWeight: 'normal', color: 'var(--text-muted)'}}>by Aayush</span></h1>
+        <div className="nav-left">
+          <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
+            {isMobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
+          </button>
+          <div className="brand-nav">
+            <div className="brand-icon"><Activity size={20} /></div>
+            <h1>ApexClientFind <span style={{fontSize: '12px', fontWeight: 'normal', color: 'var(--text-muted)'}} className="hide-on-mobile">by Aayush</span></h1>
+          </div>
         </div>
         
-        <div className="nav-links">
-          <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>
+        {isMobileMenuOpen && <div className="mobile-menu-overlay" onClick={() => setIsMobileMenuOpen(false)}></div>}
+        
+        <div className={`nav-links ${isMobileMenuOpen ? 'open' : ''}`}>
+          <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`} onClick={() => setIsMobileMenuOpen(false)}>
             <SlidersHorizontal size={16} /> Scanner
           </Link>
-          <Link to="/saved" className={`nav-link ${location.pathname === '/saved' ? 'active' : ''}`}>
+          <Link to="/saved" className={`nav-link ${location.pathname === '/saved' ? 'active' : ''}`} onClick={() => setIsMobileMenuOpen(false)}>
             <Star size={16} /> Saved Leads
           </Link>
-          <Link to="/seen" className={`nav-link ${location.pathname === '/seen' ? 'active' : ''}`}>
+          <Link to="/seen" className={`nav-link ${location.pathname === '/seen' ? 'active' : ''}`} onClick={() => setIsMobileMenuOpen(false)}>
             <Eye size={16} /> Seen
           </Link>
-          <Link to="/searches" className={`nav-link ${location.pathname === '/searches' ? 'active' : ''}`}>
+          <Link to="/searches" className={`nav-link ${location.pathname === '/searches' ? 'active' : ''}`} onClick={() => setIsMobileMenuOpen(false)}>
             <History size={16} /> Searches
           </Link>
         </div>
@@ -84,7 +92,7 @@ function Layout({ children, onLogout }: { children: React.ReactNode, onLogout: (
         <div className="nav-actions">
           <div className="user-profile">
             <div className="avatar">A</div>
-            <span>Aayush</span>
+            <span className="hide-on-mobile">Aayush</span>
             <button 
               onClick={onLogout} 
               style={{marginLeft: '12px', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '13px', cursor: 'pointer', fontWeight: 500}}
@@ -125,11 +133,27 @@ function App() {
 
   // Scanner States (Hoisted so they persist during navigation)
   const [isScanning, setIsScanning] = useState(false);
-  const [locationStr, setLocationStr] = useState('');
-  const [category, setCategory] = useState('');
+  const [locationStr, setLocationStr] = useState(() => localStorage.getItem('lastLocation') || '');
+  const [category, setCategory] = useState(() => localStorage.getItem('lastCategory') || '');
   const [maxLeads, setMaxLeads] = useState(50);
-  const [leads, setLeads] = useState<any[]>([]);
-  const [lastScanQuery, setLastScanQuery] = useState({ location: '', category: '' });
+  const [leads, setLeads] = useState<any[]>(() => {
+      try { return JSON.parse(localStorage.getItem('lastLeads') || '[]'); } catch (e) { return []; }
+  });
+  const [lastScanQuery, setLastScanQuery] = useState(() => {
+      try { return JSON.parse(localStorage.getItem('lastScanQuery') || '{"location":"","category":""}'); } catch (e) { return { location: '', category: '' }; }
+  });
+  
+  // Persist scanner state to localStorage
+  useEffect(() => {
+      try {
+          localStorage.setItem('lastLocation', locationStr);
+          localStorage.setItem('lastCategory', category);
+          localStorage.setItem('lastLeads', JSON.stringify(leads));
+          localStorage.setItem('lastScanQuery', JSON.stringify(lastScanQuery));
+      } catch (e) {
+          console.warn("localStorage quota exceeded, unable to save state.");
+      }
+  }, [locationStr, category, leads, lastScanQuery]);
   
   const [filterNoWebsite, setFilterNoWebsite] = useState(false);
   const [filterLowReviews, setFilterLowReviews] = useState(false);
@@ -187,9 +211,18 @@ function App() {
     localStorage.removeItem('isLoggedIn');
   };
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   // API Calls
   const handleScan = async () => {
     if (!locationStr) return;
+    
+    // Abort previous scan if exists
+    if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    
     setIsScanning(true);
     
     const isSameQuery = lastScanQuery.location === locationStr && lastScanQuery.category === category;
@@ -197,30 +230,68 @@ function App() {
         setLeads([]);
     }
     
+    // We will accumulate leads locally to save to history at the end
+    let accumulatedLeads: any[] = isSameQuery ? [...leads] : [];
+    
     try {
       const response = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ location: locationStr, category: category || 'Business', limit: maxLeads }) 
+        body: JSON.stringify({ location: locationStr, category: category || 'Business', limit: maxLeads }),
+        signal: abortControllerRef.current.signal
       });
-      const data = await response.json();
       
-      const processedLeads = (data.leads || []).map((l: any, idx: number) => ({
-          ...l,
-          id: l.id || `lead-${Date.now()}-${idx}`
-      }));
+      if (!response.body) throw new Error("ReadableStream not supported.");
       
-      setLeads(prev => {
-          if (!isSameQuery) return processedLeads;
-          // Deduplicate by name
-          const existingNames = new Set(prev.map(p => p.name));
-          const newLeads = processedLeads.filter((l: any) => !existingNames.has(l.name));
-          return [...prev, ...newLeads];
-      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      
+      let done = false;
+      let buffer = "";
+
+      while (!done) {
+          const { value, done: readerDone } = await reader.read();
+          if (value) {
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n\n');
+              buffer = lines.pop() || "";
+              
+              for (const line of lines) {
+                  if (line.startsWith('data: ')) {
+                      const dataStr = line.substring(6);
+                      try {
+                          const data = JSON.parse(dataStr);
+                          if (data.done) {
+                              done = true;
+                              break;
+                          }
+                          
+                          if (data.leads && Array.isArray(data.leads)) {
+                              const processedLeads = data.leads.map((l: any, idx: number) => ({
+                                  ...l,
+                                  id: l.id || `lead-${Date.now()}-${idx}`
+                              }));
+                              
+                              setLeads(prev => {
+                                  const existingNames = new Set(prev.map(p => p.name));
+                                  const newLeads = processedLeads.filter((l: any) => !existingNames.has(l.name));
+                                  const updated = [...prev, ...newLeads];
+                                  accumulatedLeads = updated; // Keep track of the final list
+                                  return updated;
+                              });
+                          }
+                      } catch (e) {
+                          console.error("Error parsing SSE data:", e);
+                      }
+                  }
+              }
+          }
+          if (readerDone) done = true;
+      }
       
       setLastScanQuery({ location: locationStr, category: category });
 
-      // Save to Search History (limit 15)
+      // Save to Search History
       setSearchHistory(prev => {
           const newHistory = [
               {
@@ -228,21 +299,27 @@ function App() {
                   location: locationStr,
                   category: category || 'Business',
                   timestamp: new Date().toISOString(),
-                  leads: processedLeads
+                  leads: accumulatedLeads
               },
               ...prev
           ].slice(0, 15);
+          
           fetch('/api/search-history', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ location: locationStr, category: category, resultsCount: processedLeads.length, leads: processedLeads })
+            body: JSON.stringify({ location: locationStr, category: category, resultsCount: accumulatedLeads.length, leads: accumulatedLeads })
           }).catch(console.error);
+          
           return newHistory;
       });
 
-    } catch (error) {
-      console.error('Error connecting to scanner API:', error);
-      alert("Failed to connect to the backend scanner.");
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+          console.log("Previous scan aborted.");
+      } else {
+          console.error('Error connecting to scanner API:', error);
+          alert("Failed to connect to the backend scanner.");
+      }
     } finally {
       setIsScanning(false);
     }
@@ -458,6 +535,17 @@ function App() {
                   <span style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
                       <Sparkles size={14} color="var(--accent)"/> Generated {pitchTypes[lead.id] === 'whatsapp' ? 'WhatsApp' : 'Email'} Pitch
                   </span>
+                  {pitchTypes[lead.id] === 'whatsapp' && lead.phone && (
+                      <a 
+                          href={`https://wa.me/${lead.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(pitches[lead.id])}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="btn-audit btn-audit-success"
+                          style={{ textDecoration: 'none', padding: '4px 10px', fontSize: '12px' }}
+                      >
+                          <Phone size={12}/> Send on WhatsApp
+                      </a>
+                  )}
               </h4>
               <textarea
                   style={{ width: '100%', minHeight: '100px', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '13px', resize: 'vertical' }}
@@ -497,6 +585,34 @@ function App() {
                   </div>
               )}
 
+              {auditResults[lead.id].decisionMakers && auditResults[lead.id].decisionMakers.length > 0 && (
+                  <div style={{ marginBottom: '12px' }}>
+                      <strong style={{ fontSize: '13px', color: 'var(--text-main)', marginBottom: '8px', display: 'block' }}>Decision Makers:</strong>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {auditResults[lead.id].decisionMakers.map((dm: any, i: number) => (
+                              <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--bg-lighter)', padding: '8px 12px', borderRadius: '6px' }}>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                      <span style={{ fontSize: '13px', color: 'var(--text-main)', fontWeight: 600 }}>
+                                          {dm.name} <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>({dm.position})</span>
+                                      </span>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                          <span style={{ fontSize: '12px', color: 'var(--accent)' }}>{dm.email}</span>
+                                          <span style={{ fontSize: '10px', background: 'rgba(255,255,255,0.1)', color: 'var(--text-muted)', padding: '2px 6px', borderRadius: '4px' }}>
+                                              {dm.source || 'Scraped'}
+                                          </span>
+                                      </div>
+                                  </div>
+                                  {dm.linkedin && (
+                                      <a href={dm.linkedin} target="_blank" rel="noreferrer" className="btn-audit tag-blue" style={{ textDecoration: 'none', padding: '4px 8px', fontSize: '12px' }}>
+                                          LinkedIn
+                                      </a>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  </div>
+              )}
+
               {auditResults[lead.id].emails && auditResults[lead.id].emails.length > 0 ? (
                   <div>
                       <strong style={{ fontSize: '13px', color: 'var(--text-main)', marginBottom: '4px', display: 'block' }}>Scraped Emails:</strong>
@@ -507,7 +623,7 @@ function App() {
                       </div>
                   </div>
               ) : (
-                  <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>No emails found on the homepage.</span>
+                  <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>No basic emails scraped on the homepage.</span>
               )}
           </div>
       )}
@@ -654,8 +770,8 @@ function App() {
           <p>Manage and track outreach for your saved contacts</p>
         </div>
         
-        <div style={{ background: 'var(--bg-panel)', borderRadius: '12px', border: '1px solid var(--border)', overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+        <div style={{ background: 'var(--bg-panel)', borderRadius: '12px', border: '1px solid var(--border)', overflowX: 'auto' }}>
+          <table style={{ width: '100%', minWidth: '800px', borderCollapse: 'collapse', textAlign: 'left' }}>
             <thead>
               <tr style={{ background: 'var(--bg-main)', borderBottom: '1px solid var(--border)' }}>
                 <th style={{ padding: '16px', fontWeight: 600, color: 'var(--text-muted)', fontSize: '12px', textTransform: 'uppercase' }}>Business</th>

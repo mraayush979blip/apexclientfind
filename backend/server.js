@@ -72,75 +72,165 @@ app.post('/api/scan', async (req, res) => {
         return res.status(400).json({ error: 'Location and category are required' });
     }
 
-    console.log(`Starting Apify scan for ${category} in ${location}...`);
+    // Track if client disconnected
+    let clientDisconnected = false;
+    req.on('close', () => {
+        clientDisconnected = true;
+        console.log(`Client disconnected during scan for ${category} in ${location}`);
+    });
 
-    if (!APIFY_API_TOKEN) {
-        console.log("No APIFY_API_TOKEN found in .env. Falling back to mock data.");
-        await new Promise(resolve => setTimeout(resolve, 4000));
-        return res.json({ leads: getMockData(category, location) });
-    }
+    // Set headers for SSE
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+    });
 
-    try {
-        // 1. Data Scraping Phase using Apify
-        const query = `${category} in ${location}`;
-        console.log(`Calling Apify (compass~crawler-google-places) for: ${query} with limit ${maxPlaces}`);
-        
-        // Prepare Actor input
-        const input = {
-            "searchStringsArray": [query],
-            "maxCrawledPlacesPerSearch": maxPlaces,
-            "language": "en",
-            "maxImages": 0,
-            "maxReviews": 0
-        };
+    // Helper to send SSE events
+    const sendEvent = (data) => {
+        if (clientDisconnected || res.writableEnded) return;
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
 
-        // Run the Actor and wait for it to finish
-        const run = await client.actor("compass~crawler-google-places").call(input);
-        
-        console.log(`Actor run finished. Fetching dataset: ${run.defaultDatasetId}`);
-
-        // Fetch results from the dataset
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
-        
-        // Filter out leads that are clearly from a different city/country due to Google Maps zoom-out
-        const locationLower = location.toLowerCase();
-        const locationParts = locationLower.split(/[\s,]+/).filter(p => p.length > 2);
-        
-        // Pass all leads to frontend so it can filter them dynamically
-        const allLeads = items
-            .map((business, index) => {
-                const websiteUrl = business.website || '';
-                const isSocialOnly = websiteUrl.includes('facebook.com') || websiteUrl.includes('instagram.com') || websiteUrl.includes('linkedin.com');
-                const hasWebsite = websiteUrl !== '' && !isSocialOnly;
+    console.log(`Starting scan for ${category} in ${location} ...`);
+    
+    // We will collect leads from all available sources
+    const sources = [];
+    
+    // 1. Apify Source (if token exists)
+    if (APIFY_API_TOKEN) {
+        const apifyPromise = (async () => {
+            try {
+                const query = `${category} in ${location}`;
+                console.log(`Calling Apify (compass~crawler-google-places) for: ${query} with limit ${maxPlaces}`);
                 
-                return {
-                    id: index,
-                    name: business.title || 'Unknown Business',
-                    address: business.address || business.city || location,
-                    phone: business.phone || business.phoneUnformatted || '',
-                    hasPhone: !!business.phone || !!business.phoneUnformatted,
-                    website: websiteUrl,
-                    hasWebsite: hasWebsite,
-                    rating: business.totalScore || 0,
-                    reviewsCount: business.reviewsCount || 0,
-                    lat: business.location?.lat,
-                    lng: business.location?.lng
+                const input = {
+                    "searchStringsArray": [query],
+                    "maxCrawledPlacesPerSearch": maxPlaces,
+                    "language": "en",
+                    "maxImages": 0,
+                    "maxReviews": 0
                 };
-            })
-            .filter(lead => {
-                // Restore the filter to prevent random global results
-                const addressLower = lead.address.toLowerCase();
-                if (locationParts.length === 0) return true;
-                return locationParts.some(part => addressLower.includes(part));
-            });
-
-        console.log(`Found ${allLeads.length} total leads. Sending to frontend.`);
-        res.json({ leads: allLeads });
         
-    } catch (error) {
-        console.error("Error calling Apify API:", error.message);
-        console.log("Falling back to mock data due to API error.");
-        res.json({ leads: getMockData(category, location) });
+                const run = await client.actor("compass~crawler-google-places").call(input);
+                const { items } = await client.dataset(run.defaultDatasetId).listItems();
+                
+                const locationLower = location.toLowerCase();
+                const locationParts = locationLower.split(/[\s,]+/).filter(p => p.length > 2);
+                
+                const allLeads = items.filter(lead => {
+                    const addressLower = (lead.address || '').toLowerCase();
+                    if (locationParts.length === 0) return true;
+                    return locationParts.some(part => addressLower.includes(part));
+                });
+                
+                // If we have literally 0 leads, return empty (don't fallback to mock here because we have multiple sources)
+                if (allLeads.length === 0) {
+                    console.log("No leads found by Apify.");
+                    sendEvent({ source: 'Apify', leads: [] });
+                    return [];
+                }
+
+                console.log(`Found ${allLeads.length} total leads from Apify. Deduplicating...`);
+                
+                // Deduplicate across paginations
+                const uniqueLeads = [];
+                const seenNames = new Set();
+                
+                for (const lead of allLeads) {
+                    const normalizedName = lead.title ? lead.title.toLowerCase().trim() : '';
+                    if (!seenNames.has(normalizedName)) {
+                        seenNames.add(normalizedName);
+                        uniqueLeads.push(lead);
+                    }
+                }
+
+                // Respect the requested limit (though Apify respects it internally, combining adds more)
+                const limitedLeads = uniqueLeads.slice(0, maxPlaces);
+                
+                const processedLeads = limitedLeads.map((l, index) => ({
+                    id: `apify-${index}`,
+                    name: l.title || 'Unknown Business',
+                    address: l.address || l.city || location,
+                    phone: l.phone || l.phoneUnformatted || '',
+                    hasPhone: !!l.phone || !!l.phoneUnformatted,
+                    website: l.website || '',
+                    hasWebsite: (l.website !== '' && !l.website?.includes('facebook.com') && !l.website?.includes('instagram.com') && !l.website?.includes('linkedin.com')),
+                    rating: l.totalScore || 0,
+                    reviewsCount: l.reviewsCount || 0,
+                    lat: l.location?.lat,
+                    lng: l.location?.lng,
+                    source: 'Google Maps'
+                }));
+
+                console.log(`Found ${processedLeads.length} total leads from Apify after deduplication.`);
+                sendEvent({ source: 'Apify', leads: processedLeads });
+                return processedLeads;
+            } catch (err) {
+                console.error("Apify Error:", err.message);
+                return [];
+            }
+        })();
+        sources.push(apifyPromise);
+    } else {
+        console.log("No APIFY_API_TOKEN found. Skipping Google Maps source.");
+    }
+    
+    // 2. OpenStreetMap Overpass Source (Free)
+    const overpassPromise = fetchFromOverpass(category, location).then(leads => {
+        sendEvent({ source: 'OpenStreetMap', leads });
+        return leads;
+    }).catch(err => {
+        console.error("Overpass error:", err);
+        return [];
+    });
+    sources.push(overpassPromise);
+    
+    // 3. TomTom API Source (Free, No CC)
+    if (process.env.TOMTOM_API_KEY) {
+        const tomtomPromise = fetchFromTomTom(category, location).then(leads => {
+            sendEvent({ source: 'TomTom', leads });
+            return leads;
+        }).catch(err => {
+            console.error("TomTom error:", err);
+            return [];
+        });
+        sources.push(tomtomPromise);
+    } else {
+        console.log("No TOMTOM_API_KEY found. Skipping TomTom source.");
+    }
+    
+    // 4. Yelp Fusion Source (if key exists)
+    if (process.env.YELP_API_KEY) {
+        const yelpPromise = fetchFromYelp(category, location).then(leads => {
+            sendEvent({ source: 'Yelp', leads });
+            return leads;
+        }).catch(err => {
+            console.error("Yelp error:", err);
+            return [];
+        });
+        sources.push(yelpPromise);
+    }
+    
+    // 5. Google Places API Source (if key exists)
+    if (process.env.GOOGLE_PLACES_API_KEY) {
+        const googlePromise = fetchFromGooglePlaces(category, location).then(leads => {
+            sendEvent({ source: 'Google Places', leads });
+            return leads;
+        }).catch(err => {
+            console.error("Google Places error:", err);
+            return [];
+        });
+        sources.push(googlePromise);
+    }
+    
+    // Wait for all sources to finish
+    try {
+        await Promise.allSettled(sources);
+    } finally {
+        // Send final completion event
+        sendEvent({ done: true });
+        res.end();
     }
 });
 
@@ -151,6 +241,199 @@ function getMockData(category, location) {
         { id: 3, name: `Apex ${category} Services`, address: `500 Industrial Blvd, ${location}`, phone: '(555) 555-6666', hasWebsite: false, rating: 4.1 },
         { id: 4, name: `Reliable ${category} of ${location}`, address: `750 West St, ${location}`, phone: '(555) 777-8888', hasWebsite: false, rating: 4.9 },
     ];
+}
+
+async function fetchFromOverpass(category, location) {
+    try {
+        console.log(`Querying Overpass API for: ${category} in ${location}`);
+        
+        // Geocode the location first to get bounding box or area
+        const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(location)}&format=json&limit=1`;
+        const nomResponse = await axios.get(nominatimUrl, { headers: { 'User-Agent': 'B2BLeadFinder/1.0' }});
+        
+        if (!nomResponse.data || nomResponse.data.length === 0) {
+            console.log(`Could not geocode location: ${location}`);
+            return [];
+        }
+        
+        // Use bbox instead of area for broader compat
+        const bbox = nomResponse.data[0].boundingbox;
+        const south = bbox[0];
+        const north = bbox[1];
+        const west = bbox[2];
+        const east = bbox[3];
+        
+        // Search nodes, ways, relations with matching tags or names
+        // Note: we do a text match on name/amenity/shop/office
+        const overpassQuery = `
+            [out:json][timeout:25];
+            (
+              nwr["name"~"${category}",i](${south},${west},${north},${east});
+              nwr["amenity"~"${category}",i](${south},${west},${north},${east});
+              nwr["shop"~"${category}",i](${south},${west},${north},${east});
+              nwr["office"~"${category}",i](${south},${west},${north},${east});
+              nwr["craft"~"${category}",i](${south},${west},${north},${east});
+            );
+            out center 100;
+        `;
+        
+        const overpassUrl = 'https://overpass-api.de/api/interpreter';
+        const response = await axios.post(overpassUrl, `data=${encodeURIComponent(overpassQuery)}`, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 30000
+        });
+        
+        const elements = response.data.elements || [];
+        
+        const results = elements
+            .filter(el => el.tags && el.tags.name)
+            .map((el, index) => {
+                const tags = el.tags;
+                const lat = el.lat || (el.center && el.center.lat);
+                const lon = el.lon || (el.center && el.center.lon);
+                
+                const addressParts = [
+                    tags['addr:housenumber'],
+                    tags['addr:street'],
+                    tags['addr:city'],
+                    tags['addr:state'],
+                    tags['addr:postcode']
+                ].filter(Boolean);
+                
+                const address = addressParts.length > 0 ? addressParts.join(', ') : location;
+                const phone = tags['phone'] || tags['contact:phone'] || '';
+                const websiteUrl = tags['website'] || tags['contact:website'] || '';
+                const isSocialOnly = websiteUrl.includes('facebook.com') || websiteUrl.includes('instagram.com') || websiteUrl.includes('linkedin.com');
+                const hasWebsite = websiteUrl !== '' && !isSocialOnly;
+                
+                return {
+                    id: `osm-${el.id}`,
+                    name: tags.name,
+                    address: address,
+                    phone: phone,
+                    hasPhone: !!phone,
+                    website: websiteUrl,
+                    hasWebsite: hasWebsite,
+                    rating: 0,
+                    reviewsCount: 0,
+                    lat: lat,
+                    lng: lon,
+                    source: 'OpenStreetMap'
+                };
+            });
+            
+        console.log(`Overpass API found ${results.length} leads.`);
+        return results;
+    } catch (error) {
+        console.error("Error calling Overpass API:", error.message);
+        return [];
+    }
+}
+
+async function fetchFromTomTom(category, location) {
+    const apiKey = process.env.TOMTOM_API_KEY;
+    if (!apiKey) return [];
+    
+    try {
+        console.log(`Querying TomTom API for: ${category} in ${location}`);
+        const url = `https://api.tomtom.com/search/2/poiSearch/${encodeURIComponent(category + ' in ' + location)}.json?key=${apiKey}&limit=100`;
+        const response = await axios.get(url, { timeout: 10000 });
+        
+        const results = response.data.results || [];
+        
+        return results.map(r => ({
+            id: `tomtom-${r.id}`,
+            name: r.poi?.name || 'Unknown Business',
+            address: r.address?.freeformAddress || location,
+            phone: r.poi?.phone || '',
+            hasPhone: !!r.poi?.phone,
+            website: r.poi?.url || '',
+            hasWebsite: !!r.poi?.url,
+            rating: 0, // TomTom doesn't typically provide ratings in this endpoint
+            reviewsCount: 0,
+            lat: r.position?.lat,
+            lng: r.position?.lon,
+            source: 'TomTom'
+        }));
+    } catch (error) {
+        console.error("TomTom API Error:", error.message);
+        return [];
+    }
+}
+
+async function fetchFromYelp(category, location) {
+    const apiKey = process.env.YELP_API_KEY;
+    if (!apiKey) return [];
+    
+    try {
+        console.log(`Querying Yelp Fusion API for: ${category} in ${location}`);
+        const url = `https://api.yelp.com/v3/businesses/search?term=${encodeURIComponent(category)}&location=${encodeURIComponent(location)}&limit=50`;
+        const response = await axios.get(url, {
+            headers: {
+                'Authorization': `Bearer ${apiKey}`
+            }
+        });
+        
+        const businesses = response.data.businesses || [];
+        
+        return businesses.map(b => ({
+            id: `yelp-${b.id}`,
+            name: b.name,
+            address: b.location?.display_address?.join(', ') || location,
+            phone: b.display_phone || b.phone || '',
+            hasPhone: !!b.phone,
+            website: b.url,
+            hasWebsite: !!b.url,
+            rating: b.rating || 0,
+            reviewsCount: b.review_count || 0,
+            lat: b.coordinates?.latitude,
+            lng: b.coordinates?.longitude,
+            source: 'Yelp'
+        }));
+    } catch (error) {
+        console.error("Yelp API Error:", error.message);
+        return [];
+    }
+}
+
+async function fetchFromGooglePlaces(category, location) {
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+    if (!apiKey) return [];
+    
+    try {
+        console.log(`Querying Google Places API for: ${category} in ${location}`);
+        const url = 'https://places.googleapis.com/v1/places:searchText';
+        const response = await axios.post(url, {
+            textQuery: `${category} in ${location}`,
+            languageCode: 'en'
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': apiKey,
+                'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.location'
+            }
+        });
+        
+        const places = response.data.places || [];
+        
+        return places.map(p => ({
+            id: `google-${p.id}`,
+            name: p.displayName?.text || 'Unknown Business',
+            address: p.formattedAddress || location,
+            phone: p.nationalPhoneNumber || '',
+            hasPhone: !!p.nationalPhoneNumber,
+            website: p.websiteUri || '',
+            hasWebsite: !!p.websiteUri,
+            rating: p.rating || 0,
+            reviewsCount: p.userRatingCount || 0,
+            lat: p.location?.latitude,
+            lng: p.location?.longitude,
+            source: 'Google Places API'
+        }));
+    } catch (error) {
+        console.error("Google Places API Error:", error.message);
+        return [];
+    }
 }
 
 app.post('/api/audit', async (req, res) => {
@@ -260,8 +543,82 @@ app.post('/api/audit', async (req, res) => {
             }
         }
 
+        // 3. Fetch Decision Makers via APIs
+        let decisionMakers = [];
+        const domain = new URL(validUrl).hostname.replace('www.', '');
+        const dmPromises = [];
+
+        if (process.env.HUNTER_API_KEY) {
+            const hunterPromise = (async () => {
+                console.log("Fetching Hunter.io for decision makers...");
+                const hunterUrl = `https://api.hunter.io/v2/domain-search?domain=${domain}&api_key=${process.env.HUNTER_API_KEY}`;
+                const hunterResponse = await axios.get(hunterUrl, { timeout: 10000 });
+                const emailsData = hunterResponse.data?.data?.emails || [];
+                return emailsData.map(e => ({
+                    name: e.first_name && e.last_name ? `${e.first_name} ${e.last_name}` : null,
+                    email: e.value,
+                    position: e.position || 'Employee',
+                    linkedin: e.linkedin || null,
+                    source: 'Hunter'
+                })).filter(e => e.name);
+            })();
+            dmPromises.push(hunterPromise);
+        }
+
+        if (process.env.APOLLO_API_KEY) {
+            const apolloPromise = (async () => {
+                console.log("Fetching Apollo.io for decision makers...");
+                const apolloUrl = `https://api.apollo.io/v1/mixed_people/search`;
+                const apolloResponse = await axios.post(apolloUrl, {
+                    api_key: process.env.APOLLO_API_KEY,
+                    q_organization_domains: domain,
+                    page: 1,
+                    person_titles: ["ceo", "founder", "owner", "president", "director", "partner", "vp", "chief"]
+                }, { timeout: 15000 });
+                
+                const people = apolloResponse.data?.people || [];
+                return people.map(p => ({
+                    name: p.first_name && p.last_name ? `${p.first_name} ${p.last_name}` : p.name,
+                    email: p.email,
+                    position: p.title || 'Decision Maker',
+                    linkedin: p.linkedin_url || null,
+                    source: 'Apollo'
+                })).filter(e => e.name);
+            })();
+            dmPromises.push(apolloPromise);
+        }
+
+        if (dmPromises.length > 0) {
+            try {
+                const results = await Promise.allSettled(dmPromises);
+                const combined = [];
+                for (const result of results) {
+                    if (result.status === 'fulfilled' && result.value) {
+                        combined.push(...result.value);
+                    } else if (result.status === 'rejected') {
+                        console.error("DM API failed:", result.reason?.message || result.reason);
+                        errors.push("A decision maker search failed.");
+                    }
+                }
+
+                // Deduplicate by email/name
+                const seenKeys = new Set();
+                for (const dm of combined) {
+                    const key = (dm.email || dm.name).toLowerCase();
+                    if (!seenKeys.has(key)) {
+                        seenKeys.add(key);
+                        decisionMakers.push(dm);
+                    }
+                }
+                console.log(`Found ${decisionMakers.length} unique decision makers from combined sources.`);
+            } catch (err) {
+                console.error("Error combining DM sources:", err.message);
+            }
+        }
+
         res.json({ 
             emails: validEmails,
+            decisionMakers,
             performanceScore,
             seoScore,
             errors
@@ -269,7 +626,7 @@ app.post('/api/audit', async (req, res) => {
     } catch (error) {
         console.error(`Failed to audit ${website}:`, error.message);
         // If the main HTML fetch fails, return empty
-        res.json({ emails: [], performanceScore: null, seoScore: null, errors: ["Website could not be reached."] });
+        res.json({ emails: [], decisionMakers: [], performanceScore: null, seoScore: null, errors: ["Website could not be reached."] });
     }
 });
 
